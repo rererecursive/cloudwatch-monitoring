@@ -315,6 +315,50 @@ namespace :cfn do
     puts "-----------------------------------------------"
   end
 
+  desc("Update a customer's monitoring stack")
+  task :update do
+    ARGV.each { |a| task a.to_sym do ; end }
+    customer = ARGV[1]
+    application = ARGV[2]
+
+    if !customer
+      puts "Usage:"
+      puts "rake cfn:update <customer> [application]"
+      exit 1
+    end
+
+    config = load_config(customer, application)
+    upload_path = config['upload_path']
+    source_region = config['alarms']['source_region']
+    source_bucket = config['alarms']['source_bucket']
+    stack_name = config['alarms']['monitoring_stack']
+    template_url = "https://s3.#{source_region}.amazonaws.com/#{source_bucket}/#{upload_path}/master.json"
+
+    if stack_name.nil?
+      puts "ERROR - name of monitoring stack not found in config."
+      exit 1
+    end
+
+    cf_client = Aws::CloudFormation::Client.new(region: source_region)
+
+    # We need to pass the parameters from the existing stack into the new stack
+    begin
+      stack = cf_client.describe_stacks({stack_name: stack_name})
+    rescue Aws::CloudFormation::Errors::ValidationError => ex
+      puts "ERROR - #{ex.class}: #{ex.message}"
+      exit 1
+    end
+
+    parameters = stack[0][0].parameters
+    # Use the existing template's values as the new parameters
+    for param in parameters do
+      param['parameter_value'] = ''
+      param.use_previous_value = true
+    end
+
+    cf_client.update_stack(stack_name: stack_name, template_url: template_url, parameters: parameters, capabilities: ["CAPABILITY_IAM"])
+  end
+
   def write_cfdndsl_template(alarms_config,configs,customer_alarms_config_file,customer,source_bucket,template_envs,output_path,upload_path, output_stream)
     FileUtils::mkdir_p output_path
     configs.each_with_index do |config,index|
