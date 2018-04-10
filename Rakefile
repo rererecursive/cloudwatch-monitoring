@@ -12,14 +12,6 @@ require 'aws-sdk'
 
 namespace :cfn do
 
-  # Global and customer config files
-  config_file = 'config/config.yml'
-  global_templates_config_file = 'config/templates.yml'
-
-  # Load global config files
-  global_templates_config = YAML.load(File.read(global_templates_config_file))
-  config = YAML.load(File.read(config_file))
-
   desc('Generate CloudFormation for CloudWatch alarms')
   task :generate do
 
@@ -39,33 +31,9 @@ namespace :cfn do
       exit 1
     end
 
-    if application
-      customer_alarms_config_file = "ciinaboxes/#{customer}/monitoring/#{application}/alarms.yml"
-      customer_templates_config_file = "ciinaboxes/#{customer}/monitoring/#{application}/templates.yml"
-      output_path = "output/#{customer}/#{application}"
-      upload_path = "cloudformation/monitoring/#{application}"
-    else
-      customer_alarms_config_file = "ciinaboxes/#{customer}/monitoring/alarms.yml"
-      customer_templates_config_file = "ciinaboxes/#{customer}/monitoring/templates.yml"
-      output_path = "output/#{customer}"
-      upload_path = "cloudformation/monitoring"
-    end
-
-    # Load customer config files
-    if File.file?(customer_alarms_config_file)
-      customer_alarms_config = YAML.load(File.read(customer_alarms_config_file))
-    else
-      puts "Failed to load #{customer_alarms_config_file}"
-      exit 1
-    end
-
-    # Merge customer template configs over global template configs
-    if File.file?(customer_templates_config_file)
-      customer_templates_config = YAML.load(File.read(customer_templates_config_file))
-      templates = CommonHelper.deep_merge(global_templates_config, customer_templates_config)
-    else
-      templates = global_templates_config
-    end
+    config = load_config(customer, application)
+    customer_alarms_config = config['alarms']
+    templates = config['templates']
 
     # Create an array of alarms based on the templates associated with each resource
     alarms = []
@@ -77,6 +45,9 @@ namespace :cfn do
     endpoints ||= {}
     rme = { resources: resources, metrics: metrics, endpoints: endpoints, hosts: hosts }
     source_bucket = customer_alarms_config['source_bucket']
+    output_path = config['output_path']
+    alarms_file = config['alarms_file']
+    upload_path = config['upload_path']
 
     rme.each do | k,v |
       if !v.nil?
@@ -173,7 +144,7 @@ namespace :cfn do
 
     ARGV.each { |a| task a.to_sym do ; end }
 
-    write_cfdndsl_template(temp_file_path,temp_file_paths,customer_alarms_config_file,customer,source_bucket,template_envs,output_path,upload_path, output_stream)
+    write_cfdndsl_template(temp_file_path,temp_file_paths,alarms_file,customer,source_bucket,template_envs,output_path,upload_path, output_stream)
   end
 
   desc('Deploy cloudformation templates to S3')
@@ -188,23 +159,10 @@ namespace :cfn do
       exit 1
     end
 
-    if application
-      customer_alarms_config_file = "ciinaboxes/#{customer}/monitoring/#{application}/alarms.yml"
-      output_path = "output/#{customer}/#{application}"
-      upload_path = "cloudformation/monitoring/#{application}"
-    else
-      customer_alarms_config_file = "ciinaboxes/#{customer}/monitoring/alarms.yml"
-      output_path = "output/#{customer}"
-      upload_path = "cloudformation/monitoring"
-    end
-
-    # Load customer config files
-    if File.file?(customer_alarms_config_file)
-      customer_alarms_config = YAML.load(File.read(customer_alarms_config_file)) if File.file?(customer_alarms_config_file)
-    else
-      puts "Failed to load #{customer_alarms_config_file}"
-      exit 1
-    end
+    config = load_config(customer, application)
+    customer_alarms_config = config['alarms']
+    output_path = config['output_path']
+    upload_path = config['upload_path']
 
     puts "-----------------------------------------------"
     s3 = Aws::S3::Client.new(region: customer_alarms_config['source_region'])
@@ -239,13 +197,14 @@ namespace :cfn do
       exit 1
     end
 
+    config = load_config(customer, application)
     if application
       customer_alarms_config_file = "ciinaboxes/#{customer}/monitoring/#{application}/alarms.yml"
     else
       customer_alarms_config_file = "ciinaboxes/#{customer}/monitoring/alarms.yml"
     end
 
-    # Load customer config files
+    # Load customer config files; continue if no file is found.
     customer_alarms_config = YAML.load(File.read(customer_alarms_config_file)) if File.file?(customer_alarms_config_file)
     customer_alarms_config ||= {}
     customer_alarms_config['resources'] ||= {}
@@ -371,4 +330,48 @@ namespace :cfn do
     File.open("#{output_path}/master.json", 'w') { |file|
       file.write(JSON.pretty_generate( CfnDsl.eval_file_with_extras("templates/master.rb",[[:yaml, customer_alarms_config_file],[:raw, "templateCount=#{configs.count}"],[:raw, "template_envs=#{template_envs}"],[:raw, "upload_path='#{upload_path}'"]],output_stream)))}
   end
+
+  # Load a customer's configuration files from disk
+  def load_config(customer, application)
+    config = {}
+
+    # Global config files
+    global_config_file = 'config/config.yml'
+    global_templates_file = 'config/templates.yml'
+
+    # Load global config files
+    global_templates_config = YAML.load(File.read(global_templates_file))
+    config = YAML.load(File.read(global_config_file))
+
+    if application
+      config['alarms_file'] = "ciinaboxes/#{customer}/monitoring/#{application}/alarms.yml"
+      config['templates_file'] = "ciinaboxes/#{customer}/monitoring/#{application}/templates.yml"
+      config['output_path'] = "output/#{customer}/#{application}"
+      config['upload_path'] = "cloudformation/monitoring/#{application}"
+    else
+      config['alarms_file'] = "ciinaboxes/#{customer}/monitoring/alarms.yml"
+      config['templates_file'] = "ciinaboxes/#{customer}/monitoring/templates.yml"
+      config['output_path'] = "output/#{customer}"
+      config['upload_path'] = "cloudformation/monitoring"
+    end
+
+    # Load customer config files
+    if File.file?(config['alarms_file'])
+      config['alarms'] = YAML.load(File.read(config['alarms_file']))
+    else
+      puts "Failed to load #{config['alarms_file']}"
+      exit 1
+    end
+
+    # Merge customer template configs over global template configs
+    if File.file?(config['templates_file'])
+      customer_templates_config = YAML.load(File.read(config['templates_file']))
+      config['templates'] = CommonHelper.deep_merge(global_templates_config, customer_templates_config)
+    else
+      config['templates'] = global_templates_config
+    end
+
+    return config
+  end
+
 end
