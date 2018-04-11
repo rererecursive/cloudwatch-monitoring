@@ -359,6 +359,92 @@ namespace :cfn do
     cf_client.update_stack(stack_name: stack_name, template_url: template_url, parameters: parameters, capabilities: ["CAPABILITY_IAM"])
   end
 
+  # Get a list of the differences between the existing and the newly generated monitoring.
+  # This is used to confirm any changes to a particular stack before deploying them.
+  desc('Compare existing and locally generated resources')
+  task :compare do
+    ARGV.each { |a| task a.to_sym do ; end }
+    customer = ARGV[1]
+
+    if !customer
+      puts "Usage:"
+      puts "rake cfn:compare <customer>"
+      exit 1
+    end
+
+    config = load_config(customer, nil)
+
+    # Load customer config files
+    upload_path = config['upload_path']
+    stack_name = config['alarms']['monitoring_stack']
+    source_bucket = config['alarms']['source_bucket']
+    source_region = config['alarms']['source_region']
+
+    # Check if the stack exists
+    cfn = Aws::CloudFormation::Client.new(region: source_region)
+    begin
+      stack = cfn.describe_stacks({stack_name: stack_name})
+    rescue Aws::CloudFormation::Errors::ValidationError => ex
+      puts "ERROR - #{ex.class}: #{ex.message}"
+      exit 1
+    end
+
+    # Use the existing template's values as the new parameters
+    parameters = stack[0][0].parameters
+
+    for param in parameters do
+      param['parameter_value'] = ''
+      param.use_previous_value = true
+    end
+
+    change_set_name = stack_name# + '-' + Time.now.to_i.to_s # Seconds since epoch
+    template_url = "https://s3.#{source_region}.amazonaws.com/#{source_bucket}/#{upload_path}/master.json"
+
+    changes = ''
+    state = 'CREATE_IN_PROGRESS'
+    set = cfn.create_change_set({stack_name: stack_name, change_set_name: change_set_name, template_url: template_url, parameters: parameters, capabilities: ["CAPABILITY_IAM"]})
+
+    # Wait until the change set is ready; it might return the wrong response.
+    loop do
+      changes = cfn.describe_change_set({stack_name: stack_name, change_set_name: change_set_name})
+
+      if changes[:status] == 'CREATE_COMPLETE'
+        break
+      elsif changes[:status] != 'CREATE_IN_PROGRESS'
+        puts "ERROR - change set returned with status #{changes[:status]}"
+        exit 1
+      end
+      sleep(3)
+    end
+
+    # Organise the changes for printing.
+    add = []
+    modify = []
+    remove = []
+
+    changes[:changes].each { |item|
+      action = item[:resource_change][:action]
+      resource_id = item[:resource_change][:logical_resource_id]
+
+      case action
+        when 'Add'
+          add.push(resource_id)
+        when 'Modify'
+          modify.push(resource_id)
+        when 'Remove'
+          remove.push(resource_id)
+        end
+    }
+
+    puts "#{add.length} resources to add: #{add}"       if add.length > 0
+    puts "#{modify.length} resources to modify: #{modify}"   if modify.length > 0
+    puts "#{remove.length} resources to remove: #{remove}"    if remove.length > 0
+
+    if add.length == 0 and modify.length == 0 and remove.length == 0
+      puts "Nothing to change."
+    end
+  end
+
   def write_cfdndsl_template(alarms_config,configs,customer_alarms_config_file,customer,source_bucket,template_envs,output_path,upload_path, output_stream)
     FileUtils::mkdir_p output_path
     configs.each_with_index do |config,index|
